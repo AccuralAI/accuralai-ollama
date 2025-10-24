@@ -1,0 +1,31 @@
+[project]
+name = "accuralai-ollama"
+version = "0.1.0"
+description = "Ollama backend adapter for the AccuralAI LLM orchestration pipeline."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "AccuralAI Maintainers" }]
+dependencies = [
+  "httpx>=0.27",
+  "pydantic>=2.5",
+  "accuralai-core",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest",
+  "pytest-anyio",
+  "pytest-mock",
+]
+
+[project.entry-points."accuralai_core.backends"]
+"ollama" = "accuralai_ollama.backend:build_ollama_backend"
+
+[project.urls]
+homepage = "https://github.com/accuralai/accuralai-ollama"
+repository = "https://github.com/accuralai/accuralai-ollama"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
