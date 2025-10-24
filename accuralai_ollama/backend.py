@@ -19,7 +19,6 @@ from accuralai_core.contracts.protocols import Backend
 
 LOGGER = logging.getLogger("accuralai.ollama")
 
-
 class OllamaOptions(BaseModel):
     """Configuration for connecting to the Ollama server."""
 
@@ -47,7 +46,7 @@ class OllamaClient:
                 base_url=self._options.host, 
                 timeout=self._options.timeout_s,
                 limits=httpx.Limits(max_keepalive_connections=2, max_connections=5),
-                http2=False,  # Disable HTTP/2 to avoid potential issues
+                http2=False,
             )
         return self._client
 
@@ -72,7 +71,6 @@ class OllamaClient:
             except json.JSONDecodeError:
                 return self._parse_streaming_json(response)
         except Exception as e:
-            # If we get an event loop error, recreate the client
             if "Event loop is closed" in str(e):
                 LOGGER.warning("Event loop error detected, recreating client")
                 await self.close()
@@ -142,11 +140,9 @@ class OllamaBackend(Backend):
         try:
             result = await self.client.generate(payload)
         except (httpx.HTTPError, asyncio.TimeoutError, RuntimeError) as error:
-            # Handle both HTTP errors and event loop errors
             if "Event loop is closed" in str(error):
                 LOGGER.warning("Event loop error during Ollama request, attempting recovery")
                 try:
-                    # Try to recreate the client and retry once
                     await self.client.close()
                     result = await self.client.generate(payload)
                 except Exception as retry_error:
@@ -179,9 +175,8 @@ class OllamaBackend(Backend):
         output_text = result.get("response") or result.get("output") or ""
         tool_calls = self._extract_tool_calls(result)
         
-        # If we have tool calls, update finish reason and output text
         if tool_calls:
-            finish_reason = "stop"  # Tool calls indicate successful completion
+            finish_reason = "stop"
             if not output_text:
                 output_text = "[tool-call]"
         else:
@@ -214,15 +209,9 @@ class OllamaBackend(Backend):
     def _extract_tool_calls(self, result: Mapping[str, Any]) -> list[Dict[str, Any]]:
         """Extract tool calls from Ollama response."""
         tool_calls: list[Dict[str, Any]] = []
-        
-        # Check for tool calls in the response
-        # Ollama may return tool calls in different formats depending on the model
         response_text = result.get("response") or result.get("output") or ""
         
-        # Look for JSON tool calls in the response text
-        # This is a basic implementation - Ollama tool calling format may vary
         try:
-            # Try to parse the entire response as JSON first
             if response_text.strip().startswith('{') and response_text.strip().endswith('}'):
                 parsed = json.loads(response_text)
                 if isinstance(parsed, dict) and "tool_calls" in parsed:
@@ -236,11 +225,8 @@ class OllamaBackend(Backend):
                                     "arguments": call.get("arguments", {}),
                                 })
         except json.JSONDecodeError:
-            # If not JSON, look for tool call patterns in the text
-            # This is a fallback for models that return tool calls as text
             pass
         
-        # Also check if Ollama returns tool calls in a dedicated field
         if "tool_calls" in result:
             tool_calls_data = result["tool_calls"]
             if isinstance(tool_calls_data, list):
