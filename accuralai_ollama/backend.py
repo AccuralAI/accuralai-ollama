@@ -38,18 +38,52 @@ class OllamaClient:
 
     def __init__(self, options: OllamaOptions) -> None:
         self._options = options
-        self._client = httpx.AsyncClient(base_url=options.host, timeout=options.timeout_s)
+        self._client: httpx.AsyncClient | None = None
+
+    async def _ensure_client(self) -> httpx.AsyncClient:
+        """Ensure we have a valid HTTP client."""
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(
+                base_url=self._options.host, 
+                timeout=self._options.timeout_s,
+                limits=httpx.Limits(max_keepalive_connections=2, max_connections=5),
+                http2=False,  # Disable HTTP/2 to avoid potential issues
+            )
+        return self._client
 
     async def close(self) -> None:
-        await self._client.aclose()
+        """Close the HTTP client safely."""
+        if self._client is not None:
+            try:
+                if not self._client.is_closed:
+                    await self._client.aclose()
+            except Exception as e:
+                LOGGER.warning("Error closing Ollama client: %s", e)
+            finally:
+                self._client = None
 
     async def generate(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        response = await self._client.post("/api/generate", json=payload)
-        response.raise_for_status()
+        client = await self._ensure_client()
         try:
-            return response.json()
-        except json.JSONDecodeError:
-            return self._parse_streaming_json(response)
+            response = await client.post("/api/generate", json=payload)
+            response.raise_for_status()
+            try:
+                return response.json()
+            except json.JSONDecodeError:
+                return self._parse_streaming_json(response)
+        except Exception as e:
+            # If we get an event loop error, recreate the client
+            if "Event loop is closed" in str(e):
+                LOGGER.warning("Event loop error detected, recreating client")
+                await self.close()
+                client = await self._ensure_client()
+                response = await client.post("/api/generate", json=payload)
+                response.raise_for_status()
+                try:
+                    return response.json()
+                except json.JSONDecodeError:
+                    return self._parse_streaming_json(response)
+            raise
 
     def _parse_streaming_json(self, response: httpx.Response) -> Dict[str, Any]:
         """Handle Ollama's newline-delimited JSON streaming format."""
@@ -107,8 +141,18 @@ class OllamaBackend(Backend):
         payload = self._build_payload(request)
         try:
             result = await self.client.generate(payload)
-        except (httpx.HTTPError, asyncio.TimeoutError) as error:
-            raise BackendError(f"Ollama request failed: {error}", cause=error) from error
+        except (httpx.HTTPError, asyncio.TimeoutError, RuntimeError) as error:
+            # Handle both HTTP errors and event loop errors
+            if "Event loop is closed" in str(error):
+                LOGGER.warning("Event loop error during Ollama request, attempting recovery")
+                try:
+                    # Try to recreate the client and retry once
+                    await self.client.close()
+                    result = await self.client.generate(payload)
+                except Exception as retry_error:
+                    raise BackendError(f"Ollama request failed after retry: {retry_error}", cause=retry_error) from retry_error
+            else:
+                raise BackendError(f"Ollama request failed: {error}", cause=error) from error
 
         return self._build_response(request, result)
 
@@ -133,10 +177,21 @@ class OllamaBackend(Backend):
 
     def _build_response(self, request: GenerateRequest, result: Mapping[str, Any]) -> GenerateResponse:
         output_text = result.get("response") or result.get("output") or ""
+        tool_calls = self._extract_tool_calls(result)
+        
+        # If we have tool calls, update finish reason and output text
+        if tool_calls:
+            finish_reason = "stop"  # Tool calls indicate successful completion
+            if not output_text:
+                output_text = "[tool-call]"
+        else:
+            finish_reason = result.get("done_reason", "stop") or "stop"
+        
         metadata = {
             "model": result.get("model"),
             "created_at": result.get("created_at"),
             "metrics": result.get("metrics") or {},
+            "tool_calls": tool_calls,
         }
         usage_data = result.get("usage") or {}
         usage = Usage(
@@ -149,12 +204,70 @@ class OllamaBackend(Backend):
             id=uuid4(),
             request_id=request.id,
             output_text=output_text,
-            finish_reason=result.get("done_reason", "stop") or "stop",
+            finish_reason=finish_reason,
             usage=usage,
             latency_ms=int((result.get("total_duration", 0) or 0) / 1_000_000),
             metadata=metadata,
             validator_events=[],
         )
+
+    def _extract_tool_calls(self, result: Mapping[str, Any]) -> list[Dict[str, Any]]:
+        """Extract tool calls from Ollama response."""
+        tool_calls: list[Dict[str, Any]] = []
+        
+        # Check for tool calls in the response
+        # Ollama may return tool calls in different formats depending on the model
+        response_text = result.get("response") or result.get("output") or ""
+        
+        # Look for JSON tool calls in the response text
+        # This is a basic implementation - Ollama tool calling format may vary
+        try:
+            # Try to parse the entire response as JSON first
+            if response_text.strip().startswith('{') and response_text.strip().endswith('}'):
+                parsed = json.loads(response_text)
+                if isinstance(parsed, dict) and "tool_calls" in parsed:
+                    tool_calls_data = parsed["tool_calls"]
+                    if isinstance(tool_calls_data, list):
+                        for call in tool_calls_data:
+                            if isinstance(call, dict) and "name" in call:
+                                tool_calls.append({
+                                    "id": f"call_{uuid4().hex}",
+                                    "name": str(call["name"]),
+                                    "arguments": call.get("arguments", {}),
+                                })
+        except json.JSONDecodeError:
+            # If not JSON, look for tool call patterns in the text
+            # This is a fallback for models that return tool calls as text
+            pass
+        
+        # Also check if Ollama returns tool calls in a dedicated field
+        if "tool_calls" in result:
+            tool_calls_data = result["tool_calls"]
+            if isinstance(tool_calls_data, list):
+                for call in tool_calls_data:
+                    if isinstance(call, dict) and "name" in call:
+                        tool_calls.append({
+                            "id": f"call_{uuid4().hex}",
+                            "name": str(call["name"]),
+                            "arguments": call.get("arguments", {}),
+                        })
+        
+        return tool_calls
+
+    async def aclose(self) -> None:
+        """Clean up resources."""
+        try:
+            await self.client.close()
+        except Exception as e:
+            LOGGER.warning("Error closing Ollama backend: %s", e)
+
+    async def __aenter__(self):
+        """Async context manager entry."""
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Async context manager exit."""
+        await self.aclose()
 
 
 async def build_ollama_backend(
