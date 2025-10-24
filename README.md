@@ -15,9 +15,11 @@ Add an Ollama backend block to your AccuralAI configuration (e.g., `~/.accuralai
 ```toml
 [backends.ollama]
 plugin = "ollama"
-options.model = "llama3"
-options.host = "http://127.0.0.1:11434"
-options.timeout_s = 60
+[backends.ollama.options]
+model = "gemma3:4b"
+host = "http://127.0.0.1:11434"
+timeout_s = 60
+keep_alive = "5m"
 ```
 
 Then run:
