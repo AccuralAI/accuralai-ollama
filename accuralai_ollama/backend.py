@@ -127,6 +127,8 @@ class OllamaBackend(Backend):
         }
         body["options"].update(self.options.extra)
         body = {key: value for key, value in body.items() if value is not None}
+        if request.tools:
+            body["tools"] = request.tools
         return body
 
     def _build_response(self, request: GenerateRequest, result: Mapping[str, Any]) -> GenerateResponse:
