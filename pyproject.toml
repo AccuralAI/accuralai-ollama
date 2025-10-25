@@ -23,8 +23,8 @@ dev = [
 "ollama" = "accuralai_ollama.backend:build_ollama_backend"
 
 [project.urls]
-homepage = "https://github.com/accuralai/accuralai-ollama"
-repository = "https://github.com/accuralai/accuralai-ollama"
+homepage = "https://accural-ai.web.app/"
+repository = "https://github.com/AccuralAI/accuralai-ollama"
 
 [build-system]
 requires = ["hatchling"]
