@@ -25,6 +25,7 @@ dev = [
 [project.urls]
 homepage = "https://accural-ai.web.app/"
 repository = "https://github.com/AccuralAI/accuralai-ollama"
+documentation = "https://accuralai.readthedocs.io/en/latest/packages/accuralai-ollama/index.html"
 
 [build-system]
 requires = ["hatchling"]
